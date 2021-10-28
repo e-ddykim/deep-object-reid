@@ -124,3 +124,23 @@ pot_parameters:
     warning: null
   type: PARAMETER_GROUP
   visible_in_ui: true
+debug_parameters:
+  description: Debugging Parameters
+  enable_debug_dump:
+    affects_outcome_of: NONE
+    default_value: true
+    description: Enable data dumps for debugging
+    editable: true
+    header: Enable data dumps for debugging
+    type: BOOLEAN
+    ui_rules:
+      action: DISABLE_EDITING
+      operator: AND
+      rules: []
+      type: UI_RULES
+    value: true
+    visible_in_ui: true
+    warning: null
+  header: Debugging Parameters
+  type: PARAMETER_GROUP
+  visible_in_ui: true

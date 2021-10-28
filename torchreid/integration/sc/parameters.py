@@ -8,6 +8,7 @@ from ote_sdk.configuration.elements import (ParameterGroup,
                                             configurable_integer,
                                             selectable,
                                             string_attribute,
+                                            configurable_boolean
                                             )
 from ote_sdk.configuration.configurable_parameters import ConfigurableParameters
 from ote_sdk.configuration.model_lifecycle import ModelLifecycle
@@ -75,6 +76,19 @@ class OTEClassificationParameters(ConfigurableParameters):
                             description="Quantization preset that defines quantization scheme",
                             editable=False, visible_in_ui=False)
 
+    @attrs
+    class __DebugParameters(ParameterGroup):
+        header = string_attribute("Debugging Parameters")
+        description = header
+
+        enable_debug_dump = configurable_boolean(
+            default_value=True,
+            header="Enable data dumps for debugging",
+            description="Enable data dumps for debugging",
+            affects_outcome_of=ModelLifecycle.NONE
+        )
+
     learning_parameters = add_parameter_group(__LearningParameters)
     algo_backend = add_parameter_group(__AlgoBackend)
     pot_parameters = add_parameter_group(__POTParameter)
+    debug_parameters = add_parameter_group(__DebugParameters)

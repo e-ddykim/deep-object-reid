@@ -1,3 +1,4 @@
+import datetime
 import io
 import logging
 import os
@@ -14,6 +15,7 @@ from torchreid.ops import DataParallel
 from torchreid.apis.export import export_onnx, export_ir
 from torchreid.apis.training import run_lr_finder, run_training
 from torchreid.utils import load_pretrained_weights, set_random_seed
+from torchreid.integration.sc.debug import debug_trace, get_dump_file_path
 from scripts.default_config import (get_default_config,
                                     imagedata_kwargs,
                                     lr_scheduler_kwargs, model_kwargs,
@@ -55,6 +57,7 @@ logger = logging.getLogger(__name__)
 class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExportTask, IUnload):
 
     task_environment: TaskEnvironment
+    _debug_dump_file_path: str = get_dump_file_path()
 
     def __init__(self, task_environment: TaskEnvironment):
         logger.info("Loading OTEClassificationTask.")
@@ -65,6 +68,14 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
         self._model_name = self._hyperparams.algo_backend.model_name
         self._labels = task_environment.get_labels(False)
         self._multilabel = len(task_environment.label_schema.get_groups(False)) > 1
+        if self._hyperparams.debug_parameters.enable_debug_dump:
+            self._debug_txt_path = os.path.join(os.path.dirname(self._debug_dump_file_path), datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + '.txt')
+            with open(self._debug_txt_path, 'wt') as f:
+                f.writelines([f'Label groups: {len(task_environment.label_schema.get_groups(False))}', '\n'])
+                for g in task_environment.label_schema.get_groups(False):
+                    f.writelines(['name:' + g.name, '\n'])
+                    for label in g.labels:
+                        f.writelines([label.name, '\n'])
 
         template_file_path = task_environment.model_template.model_template_path
 
@@ -169,6 +180,7 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
         torch.save(modelinfo, buffer)
         output_model.set_data("weights.pth", buffer.getvalue())
 
+    @debug_trace
     def infer(self, dataset: Dataset, inference_parameters: Optional[InferenceParameters] = None) -> Dataset:
         """
         Perform inference on the given dataset.
@@ -260,6 +272,7 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
 
         return output
 
+    @debug_trace
     def train(self, dataset: Dataset, output_model: ModelEntity, train_parameters: Optional[TrainParameters] = None):
         """ Trains a model on a dataset """
 
@@ -291,6 +304,9 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
         train_subset = dataset.get_subset(Subset.TRAINING)
         val_subset = dataset.get_subset(Subset.VALIDATION)
         labels = [label.name for label in self._labels]
+        if self._hyperparams.debug_parameters.enable_debug_dump:
+            with open(self._debug_txt_path, 'at') as f:
+                f.writelines([str(train_subset.get_item_labels(0)), '\n'])
         self._cfg.custom_datasets.roots = [OTEClassificationDataset(train_subset, labels, self._multilabel),
                                            OTEClassificationDataset(val_subset, labels, self._multilabel)]
         datamanager = torchreid.data.ImageDataManager(**imagedata_kwargs(self._cfg))
@@ -350,6 +366,7 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
             logger.info("Model performance has not improved while training. No new model has been saved.")
             output_model.model_status = ModelStatus.NOT_IMPROVED
 
+    @debug_trace
     def evaluate(
         self, output_resultset: ResultSetEntity, evaluation_metric: Optional[str] = None
     ):
@@ -357,6 +374,7 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
         logger.info(f"Computes performance of {performance}")
         output_resultset.performance = performance
 
+    @debug_trace
     def export(self, export_type: ExportType, output_model: ModelEntity):
         assert export_type == ExportType.OPENVINO
         optimized_model_precision = ModelPrecision.FP32
@@ -415,3 +433,47 @@ class OTEClassificationTask(ITrainingTask, IInferenceTask, IEvaluationTask, IExp
             torch.cuda.empty_cache()
             logger.warning(f"Done unloading. "
                            f"Torch is still occupying {torch.cuda.memory_allocated()} bytes of GPU memory")
+
+    def __getstate__(self):
+        from ote_sdk.configuration.helper import convert
+
+        model = {
+            'weights': self._model.state_dict(),
+            'config': self._cfg,
+        }
+        environment = {
+            'model_template': self._task_environment.model_template,
+            'hyperparams': convert(self._hyperparams, str),
+            'label_schema': self._task_environment.label_schema,
+        }
+        return {
+            'environment': environment,
+            'model': model,
+        }
+
+
+    def __setstate__(self, state):
+        from ote_sdk.configuration.helper import create
+        from dataclasses import asdict
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_template = state['environment']['model_template']
+            with open(os.path.join(tmpdir, 'main_model.yaml'), 'wb') as f:
+                state['model']['config'].dump(f)
+            with open(os.path.join(tmpdir, 'template.yaml'), 'wt') as f:
+                yaml.dump(asdict(model_template), f)
+            model_template.model_template_path = os.path.join(tmpdir, 'template.yaml')
+
+            hyperparams = create(state['environment']['hyperparams'])
+            label_schema = state['environment']['label_schema']
+            environment = TaskEnvironment(
+                model_template=model_template,
+                model=None,
+                hyper_parameters=hyperparams,
+                label_schema=label_schema,
+            )
+            self.__init__(environment)
+
+        self._model.load_state_dict(state['model']['weights'])
+        self._config = state['model']['config']
